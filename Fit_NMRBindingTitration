@@ -1,0 +1,126 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from lmfit import minimize, Parameters
+
+
+def BindFit_indi(data,H_c0,Ka_guess):
+    '''
+    Fits binding isotherm for SINGLE host (H) peak in NMR titration with guest (G).
+    Plots the fit, with the estimate for Ka indicated.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Experimental data for SIGNLE peak in NMR titration including (abritrary index):
+        initial G concentration added at each stage (G_c0) as 1st column, 
+        raw chemical shifts of one H peak (not the difference) during titration as 2nd column.
+    H_c0 : float
+        Concentration of host added to the solution (intial, before HG formed).
+
+    Returns
+    -------
+    out : minimizer object
+        Contains the results of the fitting, with estimates for Ka and dHG.
+
+    '''
+    G_c0 = data.iloc[:,0] # define [G] at each data point during the titration
+    dH = data.iloc[0,1]
+    Dds = data.iloc[:,1] - data.iloc[0,1] # define experimentally observed change in chemical shift for each chemical shift
+    # define equation for 1:1 binding example (use to model)
+    def NMRbindfit(G_c0, H_c0, dH, Ka, dHG):    
+        HG_c = 0.5 * ((G_c0 + H_c0 + 1/Ka) - np.sqrt((G_c0 + H_c0 + 1/Ka)**2 - 4*H_c0*G_c0))
+        Dd = (dH - dHG) * (HG_c / H_c0)
+        return Dd
+    # define parameters to be fit
+    fitParams = Parameters()
+    fitParams.add('Ka', value=Ka_guess, min=0) # binding constant
+    fitParams.add('dHG', value=Dds.iloc[-1]+dH) # chemical shift of 100% HG
+    # want to minimize difference between model and experimental
+    # define function to calculate residual (difference between model and experimental)
+    def resid(pars, data, G_c0, H_c0):
+        # extract parameter values
+        parvals = pars.valuesdict()
+        Ka = parvals['Ka']
+        dHG = parvals['dHG']
+        # use 1:1 binding equation to model data for each peak
+        model = NMRbindfit(G_c0, H_c0, dH, Ka, dHG)
+        return data - model
+    # minimize the residual 
+    out = minimize(resid, fitParams, method='nelder', args=(Dds,G_c0,H_c0))
+    plt.figure(figsize=(5,3))
+    plt.plot(G_c0, Dds, 'rd')
+    plt.plot(np.linspace(0,max(G_c0)),NMRbindfit(np.linspace(0,max(G_c0)), H_c0, dH, out.params['Ka'].value, out.params['dHG'].value),'k--', label=r'$\it{K}_a$ = %(Ka)1.f M$^{-1}$' %{'Ka':out.params['Ka'].value})
+    plt.xlim(0,max(G_c0)*1.1)
+    plt.xlabel('[G]$_0$ / M')
+    plt.ylabel('$\Delta\delta$ / ppm')
+    plt.legend(frameon=False)
+    return out
+        
+
+def BindFit_global(data,H_c0,Ka_guess,title):
+    '''
+    Fits binding isotherm for MULTIPLE host (H) peaks in NMR titration with guest (G).
+    Plots the fit, with the estimate for Ka indicated.
+
+    Parameters
+    ----------
+    data : pd.DataFrame
+        Experimental data for MULTIPLE peaks in NMR titration including (abritrary index):
+        initial G concentration added at each stage (G_c0) as 1st column, 
+        raw chemical shifts of multiple H peaks (not the difference) during titration as 2nd and later columns.
+    H_c0 : float
+        Concentration of host added to the solution (intial, before HG formed).
+    title : string
+        The name under which the resulting plot will be saved.
+
+    Returns
+    -------
+    out : minimizer object
+        Contains the results of the fitting, with estimates for Ka and dHG.
+
+    '''
+    G_c0 = data.iloc[:,0] # define [G] at each data point during the titration
+    dHs = data.iloc[0,1:]
+    Dds = data.iloc[:,1:] - data.iloc[0,1:] # define experimentally observed change in chemical shift for each chemical shift
+    # define equation for 1:1 binding example (use to model)
+    def NMRbindfit(G_c0, H_c0, dH, Ka, dHG):    
+        HG_c = 0.5 * ((G_c0 + H_c0 + 1/Ka) - np.sqrt((G_c0 + H_c0 + 1/Ka)**2 - 4*H_c0*G_c0))
+        Dd = (dH - dHG) * (HG_c / H_c0)
+        return Dd
+    # define parameters to be fit
+    fitParams = Parameters()
+    for i in range(len(Dds.columns)):
+        fitParams.add('Ka_%i' %(i), value=Ka_guess, min=0) # binding constant
+        fitParams.add('dHG_%i' %(i), value=Dds.iloc[-1,i]+dHs.iloc[i]) # chemical shift of 100% HG
+        if i > 0:
+            fitParams['Ka_%i' %(i)].expr = 'Ka_0'
+    # want to minimize difference between model and experimental
+    # define function to calculate residual (difference between model and experimental)
+    def resid(pars, data, G_c0, H_c0, dH):
+        # make array same size as data to get residual for each point
+        resi = 0.0*np.array(data.T) # transpose data because otherwise it takes rows as array (not columns)
+        # extract parameter values
+        parvals = pars.valuesdict()
+        for i in range(len(Dds.columns)):
+            Ka = parvals['Ka_%i' %(i)]
+            dHG = parvals['dHG_%i' %(i)]
+            dH = dHs.iloc[i]
+            Dd = data.iloc[:,i]
+            # use 1:1 binding equation to model data for each peak
+            model = NMRbindfit(G_c0, H_c0, dH, Ka, dHG)
+            resi[i,:] = Dd - model
+        return resi.flatten()
+    # minimize the residual 
+    out = minimize(resid, fitParams, method='nelder', args=(Dds,G_c0,H_c0,dHs), nan_policy='omit')
+    plt.figure(figsize=(5,3))
+    for i,col in zip(range(len(Dds.columns)),plt.cm.nipy_spectral(np.linspace(0, 1, len(Dds.columns)))):
+        plt.plot(G_c0, Dds.iloc[:,i], 'd',color=col)
+        plt.plot(np.linspace(0,max(G_c0)),NMRbindfit(np.linspace(0,max(G_c0)), H_c0, dHs.iloc[i], out.params['Ka_%i' %(i)].value, out.params['dHG_%i' %(i)].value),'--',color=col)
+    plt.plot([0,0],[0,0],'wx',label=r'$\it{K}_a$ = %(Ka_0)1.f M$^{-1}$' %{'Ka_0':out.params['Ka_0'].value})
+    plt.xlim(0,max(G_c0)*1.1)
+    plt.xlabel('[G]$_0$ / M')
+    plt.ylabel('$\Delta\delta$ / ppm')
+    plt.legend(frameon=False)
+    plt.tight_layout()
+    plt.savefig(title+'.pdf',bbox_inches='tight')
+    return out
